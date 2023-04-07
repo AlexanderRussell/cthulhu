@@ -1,6 +1,8 @@
 #![allow(dead_code, unused_imports)]
-use crate::data::*;
+// use crate::data::*;
 use parking_lot::Mutex;
+use parking_lot::RwLock;
+
 use rayon::current_num_threads;
 use rayon::current_thread_index;
 use rayon::prelude::*;
@@ -10,12 +12,14 @@ use std::error::Error;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::sync::Arc;
-pub type Row = Vec<String>;
+use xlsxwriter::Workbook;
+pub type Row = Arc<RwLock<Vec<String>>>;
 
 #[derive(Debug)]
 pub struct Table {
     columns: HashMap<usize, String>,
     data: Vec<Row>,
+    rows: HashMap<usize, Row>,
 }
 
 impl Table {
@@ -23,6 +27,7 @@ impl Table {
         Table {
             columns: HashMap::new(),
             data: Vec::new(),
+            rows: HashMap::new(),
         }
     }
 
@@ -30,20 +35,81 @@ impl Table {
         let column_index = self.columns.len();
         self.columns.insert(column_index, column_name);
         for row in &mut self.data {
-            row.push(String::new());
+            row.write().push(String::new());
         }
+    }
+
+    pub fn create_sub_table(&self, columns: Vec<&str>) -> Table {
+        let mut sub_table = Table::new();
+        for column in &columns {
+            sub_table.add_column(column.to_string());
+        }
+        for row in &self.data {
+            let new_row = Row::new(RwLock::new(Vec::new()));
+            for column in &columns {
+                let column_index = self.columns.iter().find_map(|(index, name)| {
+                    if name == column {
+                        Some(index.clone())
+                    } else {
+                        None
+                    }
+                });
+                if let Some(column_index) = column_index {
+                    let read = row.read();
+                    let value = read.get(column_index).unwrap();
+                    new_row.write().push(value.clone());
+                }
+            }
+            sub_table.add_row(new_row);
+        }
+        sub_table
+    }
+
+    pub fn get_columns(&self) -> &HashMap<usize, String> {
+        &self.columns
+    }
+
+    pub fn import_columns(&mut self, columns: &HashMap<usize, String>) {
+        self.columns = columns.clone();
     }
 
     pub fn add_row(&mut self, row: Row) {
         if self.columns.is_empty() {
-            for (index, _) in row.iter().enumerate() {
+            for (index, _) in row.write().iter().enumerate() {
                 self.columns.insert(index, String::new());
             }
         }
+        self.rows.insert(self.rows.len(), row.clone());
         self.data.push(row);
     }
 
-    pub fn get_value<'t>(&'t self, field: &str, row: &'t Row) -> Option<&String> {
+    pub fn clone_rows(&self, rows: Vec<&Row>) -> Vec<Row> {
+        let mut new_rows = Vec::new();
+        for row in rows {
+            let new_row = Row::new(RwLock::new(row.read().clone()));
+            new_rows.push(new_row);
+        }
+        new_rows
+    }
+
+    pub fn retain(&mut self, rows: Vec<Row>) {
+        let mut new_data = Vec::new();
+        let rows: Vec<Vec<String>> = rows.iter().map(|row| row.read().clone()).collect();
+        for row in &self.data {
+            let row = row.read().clone();
+            if rows.contains(&row) {
+                new_data.push(Arc::new(RwLock::new(row)));
+            }
+        }
+        self.data = new_data;
+    }
+
+    pub fn get_row(&self, index: usize) -> Option<&Row> {
+        self.data.get(index)
+    }
+
+    pub fn get_value<'t>(&'t self, field: &str, row: &'t Row) -> Option<*const String> {
+        // let working_row = row.read();
         let column_index = self.columns.iter().find_map(|(index, name)| {
             if name == field {
                 Some(index.clone())
@@ -52,10 +118,47 @@ impl Table {
             }
         });
         if let Some(column_index) = column_index {
-            row.get(column_index)
+            // println!("getting row for {}, column id {}", field, column_index);
+            // println!("getting row for {}", field);
+            // creating a pointer to the string in the row
+            let read = row.read();
+            let the_value = read.get(column_index);
+            if let Some(the_value) = the_value {
+                let value_pointer = the_value as *const String;
+                Some(value_pointer)
+            } else {
+                None
+            }
         } else {
             None
         }
+    }
+
+    pub fn set_value(&self, field: &str, row: &Row, value: String) {
+        let column_index = self.columns.iter().find_map(|(index, name)| {
+            if name == field {
+                Some(index.clone())
+            } else {
+                None
+            }
+        });
+        // println!("setting row for {} to {}", field, value);
+        if let Some(column_index) = column_index {
+            // println!("changed index {} to {}", column_index, value);
+            // row.write().insert(column_index, value);
+            row.write()[column_index] = value;
+        }
+    }
+
+    pub fn get_all_rows(&self) -> Vec<&Row> {
+        self.data.iter().collect()
+    }
+    pub fn get_all_rows_as_index_map(&self) -> HashMap<usize, &Row> {
+        let mut map = HashMap::new();
+        for (index, row) in self.data.iter().enumerate() {
+            map.insert(index, row);
+        }
+        map
     }
 
     pub fn search_rows_contains<'t>(
@@ -71,8 +174,10 @@ impl Table {
         }
         rows.par_iter().for_each(|row| {
             if let Some(value) = self.get_value(column_name, row) {
+                let value = unsafe { &*value };
                 for a_value in &values {
-                    if a_value.contains(value) {
+                    // println!("comparing {} with {}", a_value, value);
+                    if value.contains(a_value) {
                         let index = current_thread_index().unwrap();
                         handles[index].lock().push(*row);
                     }
@@ -99,7 +204,7 @@ impl Table {
         if let Some(column_index) = column_index {
             self.data
                 .par_iter()
-                .filter(|row| row.get(column_index) == Some(&value.to_owned()))
+                .filter(|row| row.read().get(column_index) == Some(&value.to_owned()))
                 .collect()
         } else {
             Vec::new()
@@ -118,7 +223,7 @@ impl Table {
             self.data
                 .par_iter()
                 .filter(|row| {
-                    if let Some(value) = row.get(column_index) {
+                    if let Some(value) = row.read().get(column_index) {
                         values.contains(&value.as_str())
                     } else {
                         false
@@ -141,7 +246,7 @@ impl Table {
         if let Some(column_index) = column_index {
             self.data
                 .par_iter()
-                .filter(|row| row.get(column_index) != Some(&value.to_owned()))
+                .filter(|row| row.read().get(column_index) != Some(&value.to_owned()))
                 .collect()
         } else {
             Vec::new()
@@ -150,9 +255,9 @@ impl Table {
 
     pub fn get_row_as_map(&self, row: Row) -> HashMap<String, String> {
         let mut row_map = HashMap::new();
-        for (index, value) in row.into_iter().enumerate() {
+        for (index, value) in row.read().iter().enumerate() {
             if let Some(column_name) = self.columns.get(&index) {
-                row_map.insert(column_name.to_owned(), value);
+                row_map.insert(column_name.to_owned(), value.to_owned());
             }
         }
         row_map
@@ -168,8 +273,10 @@ impl Table {
         }) {
             self.data.sort_by(|row1, row2| {
                 let def = String::new();
-                let value1 = row1.get(column_index).unwrap_or(&def);
-                let value2 = row2.get(column_index).unwrap_or(&def);
+                let read_1 = row1.read();
+                let read_2 = row2.read();
+                let value1 = read_1.get(column_index).unwrap_or(&def);
+                let value2 = read_2.get(column_index).unwrap_or(&def);
                 value1.partial_cmp(value2).unwrap_or(Ordering::Equal)
             });
         }
@@ -189,13 +296,37 @@ impl Table {
         }) {
             rows.sort_by(|row1, row2| {
                 let def = String::new();
-                let value1 = row1.get(column_index).unwrap_or(&def);
-                let value2 = row2.get(column_index).unwrap_or(&def);
+                let read_1 = row1.read();
+                let read_2 = row2.read();
+                let value1 = read_1.get(column_index).unwrap_or(&def);
+                let value2 = read_2.get(column_index).unwrap_or(&def);
                 value1.partial_cmp(value2).unwrap_or(Ordering::Equal)
             });
         };
         rows
     }
+}
+
+pub fn write_table_to_xlsx(
+    table: &Table,
+    name: Option<&str>,
+    workbook: &mut Workbook,
+) -> Result<(), Box<dyn Error>> {
+    let mut worksheet = workbook.add_worksheet(name)?;
+    let mut row = 0;
+    // let mut col = 0;
+    for (index, name) in table.columns.iter() {
+        worksheet.write_string(row, *index as u16, name, None)?;
+    }
+    row += 1;
+    for row_data in table.data.iter() {
+        let row_data = row_data.read();
+        for (index, value) in row_data.iter().enumerate() {
+            worksheet.write_string(row, index as u16, value, None)?;
+        }
+        row += 1;
+    }
+    Ok(())
 }
 
 pub fn read_csv_to_table(file_path: &str, skip: Option<usize>) -> Result<Table, Box<dyn Error>> {
@@ -225,6 +356,7 @@ pub fn read_csv_to_table(file_path: &str, skip: Option<usize>) -> Result<Table, 
         for field in record.iter() {
             row.push(field.to_owned());
         }
+        let row = Arc::new(RwLock::new(row));
         table.data.push(row);
     }
     Ok(table)
@@ -235,13 +367,13 @@ pub fn read_csv(file_path: &str, skip: Option<usize>) -> Result<Table, Box<dyn E
     let mut lines = BufReader::new(file).lines();
 
     // Read the first line as the column names
-    let column_names: Row = lines
+    let column_names: Vec<String> = lines
         .nth(skip.unwrap_or(0))
         .expect("dun goofed no utf8???")?
         .split(',')
         .map(|s| s.trim().to_owned())
         .collect();
-
+    // let column_names = A
     // Create a new table with the column names
     let mut table = Table::new();
     for column_name in column_names {
@@ -251,12 +383,13 @@ pub fn read_csv(file_path: &str, skip: Option<usize>) -> Result<Table, Box<dyn E
     // Read the remaining lines as data rows
     for line in lines.enumerate() {
         // println!("bad line is {:?}", line.0);
-        let row: Row = line
+        let row: Vec<String> = line
             .1
             .expect("bad line")
             .split(',')
             .map(|s| s.trim().to_owned())
             .collect();
+        let row = Arc::new(RwLock::new(row));
         table.add_row(row);
     }
 
@@ -280,3 +413,5 @@ mod test {
         println!("{:#?}", top_ten);
     }
 }
+
+// https://anztech.service-now.com/nav_to.do?uri=%2F$sn_global_search_results.do%3Fsysparm_search%3D
