@@ -1,8 +1,7 @@
-#![allow(dead_code, unused_imports)]
+#![allow(unused_imports)]
 // use crate::data::*;
 use parking_lot::Mutex;
 use parking_lot::RwLock;
-
 use rayon::current_num_threads;
 use rayon::current_thread_index;
 use rayon::prelude::*;
@@ -11,15 +10,18 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
+use std::ptr::eq;
 use std::sync::Arc;
 use xlsxwriter::Workbook;
+
+use crate::filtering::FilterRows;
 pub type Row = Arc<RwLock<Vec<String>>>;
 
 #[derive(Debug)]
 pub struct Table {
     columns: HashMap<usize, String>,
     data: Vec<Row>,
-    rows: HashMap<usize, Row>,
+    // rows: HashMap<usize, Row>,
 }
 
 impl Table {
@@ -27,10 +29,19 @@ impl Table {
         Table {
             columns: HashMap::new(),
             data: Vec::new(),
-            rows: HashMap::new(),
+            // rows: HashMap::new(),
         }
     }
 
+    pub fn get_data(&self) -> &Vec<Row> {
+        &self.data
+    }
+
+    // pub fn get_rows(&self) -> &HashMap<usize, Row> {
+    //     &self.rows
+    // }
+
+    /// Adds a new column to the `Table`.
     pub fn add_column(&mut self, column_name: String) {
         let column_index = self.columns.len();
         self.columns.insert(column_index, column_name);
@@ -73,16 +84,30 @@ impl Table {
         self.columns = columns.clone();
     }
 
+    pub fn reame_column(&mut self, old_name: &str, new_name: &str) {
+        let column_index = self.columns.iter().find_map(|(index, name)| {
+            if name == old_name {
+                Some(index.clone())
+            } else {
+                None
+            }
+        });
+        if let Some(column_index) = column_index {
+            self.columns.insert(column_index, new_name.to_string());
+        }
+    }
+
     pub fn add_row(&mut self, row: Row) {
         if self.columns.is_empty() {
             for (index, _) in row.write().iter().enumerate() {
                 self.columns.insert(index, String::new());
             }
         }
-        self.rows.insert(self.rows.len(), row.clone());
+        // self.rows.insert(self.rows.len(), row.clone());
         self.data.push(row);
     }
 
+    // this is dumb and stupid
     pub fn clone_rows(&self, rows: Vec<&Row>) -> Vec<Row> {
         let mut new_rows = Vec::new();
         for row in rows {
@@ -108,8 +133,11 @@ impl Table {
         self.data.get(index)
     }
 
-    pub fn get_value<'t>(&'t self, field: &str, row: &'t Row) -> Option<*const String> {
-        // let working_row = row.read();
+    /// returns a value of a row at a given column field. Returns None if the field is not found,
+    /// or a String pointer if the field is found.
+    /// This is done to avoid cloning, as well as get around the borrow checker being
+    /// mad that I am trying to return a ref to a 'temporary' value
+    pub fn get_value<'t>(&'t self, field: &str, row: &'t Row) -> Option<&String> {
         let column_index = self.columns.iter().find_map(|(index, name)| {
             if name == field {
                 Some(index.clone())
@@ -118,13 +146,11 @@ impl Table {
             }
         });
         if let Some(column_index) = column_index {
-            // println!("getting row for {}, column id {}", field, column_index);
-            // println!("getting row for {}", field);
-            // creating a pointer to the string in the row
             let read = row.read();
             let the_value = read.get(column_index);
             if let Some(the_value) = the_value {
                 let value_pointer = the_value as *const String;
+                let value_pointer = unsafe { &*value_pointer };
                 Some(value_pointer)
             } else {
                 None
@@ -142,10 +168,7 @@ impl Table {
                 None
             }
         });
-        // println!("setting row for {} to {}", field, value);
         if let Some(column_index) = column_index {
-            // println!("changed index {} to {}", column_index, value);
-            // row.write().insert(column_index, value);
             row.write()[column_index] = value;
         }
     }
@@ -161,6 +184,20 @@ impl Table {
         map
     }
 
+    pub fn index_to_field(&self, index: usize) -> Option<&str> {
+        self.columns.get(&index).map(|s| s.as_str())
+    }
+
+    pub fn field_to_index(&self, field: &str) -> Option<usize> {
+        self.columns.iter().find_map(|(index, name)| {
+            if name == field {
+                Some(index.clone())
+            } else {
+                None
+            }
+        })
+    }
+
     pub fn search_rows_contains<'t>(
         &'t self,
         column_name: &str,
@@ -174,7 +211,6 @@ impl Table {
         }
         rows.par_iter().for_each(|row| {
             if let Some(value) = self.get_value(column_name, row) {
-                let value = unsafe { &*value };
                 for a_value in &values {
                     // println!("comparing {} with {}", a_value, value);
                     if value.contains(a_value) {
@@ -187,20 +223,13 @@ impl Table {
         let mut ret_vec = Vec::new();
         for handle in handles {
             let mut handle = handle.lock();
-            ret_vec.append(&mut handle);
         }
 
         ret_vec
     }
 
-    pub fn search_eq(&self, column_name: &str, value: &str) -> Vec<&Row> {
-        let column_index = self.columns.iter().find_map(|(index, name)| {
-            if name == column_name {
-                Some(index.clone())
-            } else {
-                None
-            }
-        });
+    pub fn search_eq_old(&self, column_name: &str, value: &str) -> Vec<&Row> {
+        let column_index = self.field_to_index(column_name);
         if let Some(column_index) = column_index {
             self.data
                 .par_iter()
@@ -211,14 +240,18 @@ impl Table {
         }
     }
 
+    pub fn search_eq(&self, column_name: &str, value: &str) -> Vec<Row> {
+        let column_index = self.field_to_index(column_name);
+        if let Some(column_index) = column_index {
+            self.data
+                .eq(column_index, vec![value])
+        } else {
+            Vec::new()
+        }
+    }
+
     pub fn search_eq_many(&self, column_name: &str, values: Vec<&str>) -> Vec<&Row> {
-        let column_index = self.columns.iter().find_map(|(index, name)| {
-            if name == column_name {
-                Some(index.clone())
-            } else {
-                None
-            }
-        });
+        let column_index = self.field_to_index(column_name);
         if let Some(column_index) = column_index {
             self.data
                 .par_iter()
@@ -282,11 +315,11 @@ impl Table {
         }
     }
 
-    pub fn sort_rows_by_column<'row>(
+    pub fn sort_rows_by_column(
         &self,
-        mut rows: Vec<&'row Row>,
+        mut rows: Vec<Row>,
         column_name: &str,
-    ) -> Vec<&'row Row> {
+    ) -> Vec<Row> {
         if let Some(column_index) = self.columns.iter().find_map(|(index, name)| {
             if name == column_name {
                 Some(index.clone())
@@ -339,10 +372,7 @@ pub fn read_csv_to_table(file_path: &str, skip: Option<usize>) -> Result<Table, 
         .records()
         .nth(skip.unwrap_or(0))
         .ok_or("no row found after skip")?;
-    let header = match header {
-        Ok(header) => header,
-        Err(_) => Err("no header row found")?,
-    };
+    let header = header?;
     for (i, field) in header.iter().enumerate() {
         column_record.insert(i, field.to_owned());
     }
@@ -397,21 +427,21 @@ pub fn read_csv(file_path: &str, skip: Option<usize>) -> Result<Table, Box<dyn E
 }
 
 mod test {
+    use crate::table::*;
+    // use super::*;
 
-    use super::*;
-
-    #[test]
-    fn test_read_csv() {
-        let table = read_csv("feb.csv", Some(2)).unwrap();
-        let search = table.search_eq("", "Total for Agent:");
-        let mut search = table.sort_rows_by_column(search, "Duration");
-        search.reverse();
-        let mut top_ten = Vec::new();
-        for row in search.iter().take(9) {
-            top_ten.push(*row);
-        }
-        println!("{:#?}", top_ten);
-    }
+    // #[test]
+    // fn test_read_csv() {
+    //     let table = read_csv("feb.csv", Some(2)).unwrap();
+    //     let search = table.search_eq("", "Total for Agent:");
+    //     let mut search = table.sort_rows_by_column(search, "Duration");
+    //     search.reverse();
+    //     let mut top_ten = Vec::new();
+    //     for row in search.iter().take(9) {
+    //         top_ten.push(*row);
+    //     }
+    //     println!("{:#?}", top_ten);
+    // }
 }
 
 // https://anztech.service-now.com/nav_to.do?uri=%2F$sn_global_search_results.do%3Fsysparm_search%3D

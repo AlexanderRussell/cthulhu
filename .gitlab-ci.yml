@@ -12,8 +12,8 @@ rust-latest:
     - rustup target add x86_64-pc-windows-gnu
     - cargo build --release --target x86_64-pc-windows-gnu
     # running the code_signing tool to automatically sign the output code
-    - .secure_files/code_sign monthly_report_extractor target/x86_64-pc-windows-gnu/release/monthly_report_extractor.exe target/x86_64-pc-windows-gnu/release/monthly_report_extractor_signed.exe
+    - .secure_files/code_sign reporting_tool target/x86_64-pc-windows-gnu/release/reporting_tool.exe target/x86_64-pc-windows-gnu/release/reporting_tool_signed.exe
   artifacts:
     paths:
-      - target/x86_64-pc-windows-gnu/release/monthly_report_extractor_signed.exe
+      - target/x86_64-pc-windows-gnu/release/reporting_tool_signed.exe
 
