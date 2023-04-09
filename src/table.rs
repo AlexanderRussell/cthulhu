@@ -60,7 +60,7 @@ impl Table {
             for column in &columns {
                 let column_index = self.columns.iter().find_map(|(index, name)| {
                     if name == column {
-                        Some(index.clone())
+                        Some(*index)
                     } else {
                         None
                     }
@@ -87,7 +87,7 @@ impl Table {
     pub fn reame_column(&mut self, old_name: &str, new_name: &str) {
         let column_index = self.columns.iter().find_map(|(index, name)| {
             if name == old_name {
-                Some(index.clone())
+                Some(*index)
             } else {
                 None
             }
@@ -140,7 +140,7 @@ impl Table {
     pub fn get_value<'t>(&'t self, field: &str, row: &'t Row) -> Option<&String> {
         let column_index = self.columns.iter().find_map(|(index, name)| {
             if name == field {
-                Some(index.clone())
+                Some(*index)
             } else {
                 None
             }
@@ -163,7 +163,7 @@ impl Table {
     pub fn set_value(&self, field: &str, row: &Row, value: String) {
         let column_index = self.columns.iter().find_map(|(index, name)| {
             if name == field {
-                Some(index.clone())
+                Some(*index)
             } else {
                 None
             }
@@ -191,7 +191,7 @@ impl Table {
     pub fn field_to_index(&self, field: &str) -> Option<usize> {
         self.columns.iter().find_map(|(index, name)| {
             if name == field {
-                Some(index.clone())
+                Some(*index)
             } else {
                 None
             }
@@ -220,9 +220,9 @@ impl Table {
                 }
             }
         });
-        let mut ret_vec = Vec::new();
+        let ret_vec = Vec::new();
         for handle in handles {
-            let mut handle = handle.lock();
+            let _handle = handle.lock();
         }
 
         ret_vec
@@ -271,7 +271,7 @@ impl Table {
     pub fn search_ne(&self, column_name: &str, value: &str) -> Vec<&Row> {
         let column_index = self.columns.iter().find_map(|(index, name)| {
             if name == column_name {
-                Some(index.clone())
+                Some(*index)
             } else {
                 None
             }
@@ -299,7 +299,7 @@ impl Table {
     pub fn sort_by_column(&mut self, column_name: &str) {
         if let Some(column_index) = self.columns.iter().find_map(|(index, name)| {
             if name == column_name {
-                Some(index.clone())
+                Some(*index)
             } else {
                 None
             }
@@ -322,7 +322,7 @@ impl Table {
     ) -> Vec<Row> {
         if let Some(column_index) = self.columns.iter().find_map(|(index, name)| {
             if name == column_name {
-                Some(index.clone())
+                Some(*index)
             } else {
                 None
             }

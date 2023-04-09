@@ -1,6 +1,6 @@
 // #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")] // hide console window on Windows in release
 use chrono::NaiveTime;
-use cthulhu::filtering::*;
+
 use cthulhu::table::*;
 use hashbrown::HashMap;
 use mimalloc::MiMalloc;
@@ -144,7 +144,7 @@ fn main() {
         }
     }
 
-    tables.par_iter_mut().for_each(|(name, table)|{
+    tables.par_iter_mut().for_each(|(_name, table)|{
         // let table_start = Instant::now();
         table.add_column("Duration".to_string());
         let mut current_date = String::new();
@@ -171,7 +171,7 @@ fn main() {
                 // let date_start = Instant::now();
                 let date = table.get_value("Date", row);
                 if let Some(date) = date {
-                    if date == "" {
+                    if date.is_empty() {
                         table.set_value("Date", row, current_date.clone());
                     } else {
                         current_date = date.clone();
@@ -328,7 +328,7 @@ table.retain(table.clone_rows(buddy_rows));
     for (_, agent) in name_duration_map.iter().rev() {
         let table = tables.get_mut(*agent).unwrap();
         // let mut workbook = Workbook::new(format!("{}.xlsx", agent)).unwrap();
-        write_table_to_xlsx(&table, Some(agent), &mut report_workbook).unwrap();
+        write_table_to_xlsx(table, Some(agent), &mut report_workbook).unwrap();
         // workbook.close().unwrap();
     }
     report_workbook.close().unwrap();
