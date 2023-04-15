@@ -1,7 +1,4 @@
 use crate::table::*;
-// use parking_lot::RwLock;
-// use std::sync::Arc;
-
 use rayon::prelude::*;
 pub trait FilterRows {
     fn eq(&self, column_index: usize, values: Vec<&str>) -> Vec<Row>;
@@ -10,6 +7,7 @@ pub trait FilterRows {
     fn ne(&self, column_index: usize, values: Vec<&str>) -> Vec<Row>;
     fn ne_first(&self, column_index: usize, values: Vec<&str>) -> Row;
     fn ne_any(&self, column_index: usize, values: Vec<&str>) -> Row;
+    fn contains(&self, column_index: usize, values: Vec<&str>) -> Vec<Row>;
 }
 
 impl FilterRows for Vec<Row> {
@@ -77,5 +75,16 @@ impl FilterRows for Vec<Row> {
             })
             .unwrap()
             .clone()
+    }
+
+    fn contains(&self, column_index: usize, values: Vec<&str>) -> Vec<Row> {
+        self.par_iter()
+            .filter(|row| {
+                let row = row.read();
+                let value = row.get(column_index).unwrap();
+                values.iter().any(|x| value.contains(x))
+            })
+            .map(|row| row.clone())
+            .collect()
     }
 }
