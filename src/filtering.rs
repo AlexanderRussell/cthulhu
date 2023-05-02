@@ -1,4 +1,4 @@
-use crate::table::*;
+use crate::tentable::*;
 use rayon::prelude::*;
 pub trait FilterRows {
     fn eq(&self, column_index: usize, values: Vec<&str>) -> Vec<Row>;

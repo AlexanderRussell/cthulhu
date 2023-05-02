@@ -1,4 +1,4 @@
-use cthulhu::table::*;
+use cthulhu::tentable::*;
 use mimalloc::MiMalloc;
 use std::env;
 use std::time::Instant;

@@ -1,5 +1,5 @@
 use parking_lot::RwLock;
-use parking_lot::Mutex;
+// use parking_lot::Mutex;
 // use rayon::prelude::*;
 use std::cmp::Ordering;
 use std::collections::HashMap;
@@ -24,10 +24,11 @@ pub struct ShardID {
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct Table {
     name: Option<String>,
+    latest_row: usize,
     columns: BTreeMap<usize, String>,
     shard: Option<ShardID>,
-    timestamps: Vec<i64>,
-    data: Vec<Row>,
+    timestamps: HashMap<usize, i64>,
+    data: HashMap<usize, Row>,
     
     // timestamps: 
 }
@@ -38,9 +39,12 @@ impl Table {
             name: None,
             // columns: HashMap::new(),
             columns: BTreeMap::new(),
-            data: Vec::new(),
+            // data: Vec::new(),
+            data: HashMap::new(),
+            latest_row: 0,
             shard: None,
-            timestamps: Vec::new(),
+            // timestamps: Vec::new(),
+            timestamps: HashMap::new(),
         }
     }
 
@@ -62,6 +66,39 @@ impl Table {
         Ok(table)
     }
 
+    // pub fn to_shards(self, shards: usize) -> Result<Vec<Table>, Box<dyn Error>> {
+    //     if self.shard.is_some() {
+    //         let shard_error = format!("Table {} is already sharded", self.name.unwrap_or("UNNAMED".to_string()));
+    //         return Err(shard_error.into());
+    //     }
+    //     let mut tables = Vec::new();
+    //     let split = self.data.len();
+    //     let mut shard_id = 1;
+    //     let row_shards: Vec<Vec<Row>> = self
+    //         .data
+    //         .into_values()
+    //         .collect::<Vec<Row>>()
+    //         .chunks(split / shards)
+    //         .map(|row| row.into())
+    //         .collect();
+    //     // let schema = self.schema.clone();
+    //     let latest_nat_key = self.latest_row;
+    //     for rows in row_shards {
+    //         let mut table = Table::new();
+    //         for row in rows {
+    //             table.data.insert(row.get_row_id(), row.clone());
+    //         }
+    //         table.shard = Some(ShardID {
+    //             id: shard_id,
+    //             shards,
+    //         });
+    //         // removing the shard amount from the natural key means no natural key space is lost
+    //         table.latest_row_id = latest_nat_key + shard_id - shards;
+    //         tables.push(table);
+    //         shard_id += 1;
+    //     }
+    //     Ok(tables)
+    // }
 
     pub fn to_shards(self, shards: usize) -> Result<Vec<Table>, Box<dyn Error>> {
         if self.shard.is_some() {
@@ -70,8 +107,8 @@ impl Table {
         }
         let columns = self.columns.clone();
         let mut result = vec![Table::new(); shards];
-        for (i, item) in self.data.into_iter().enumerate() {
-            result[i % shards].data.push(item);
+        for (i, item) in self.data.into_iter() {
+            result[i % shards].data.insert(i, item);
         }
         for (i, table) in result.iter_mut().enumerate() {
             table.shard = Some(ShardID {
@@ -89,28 +126,18 @@ impl Table {
         if tables.len() == 0 {
             return Ok(new_table);
         }
-        let mut data_len = 0;
-        for table in &tables {
-            data_len += table.data.len();
-        }
-        let columns = tables[0].columns.clone();
-        new_table.data = vec![Row::new(RwLock::new(Vec::new())); data_len];
-        let new_table = Arc::new(Mutex::new(new_table));
-        for (i, table) in tables.into_iter().enumerate() {
-            let increment = &table.shard.expect("should have a shard").shards;
-            let mut inject = i;
-            for row in table.data {
-                let mut guard = new_table.lock();
-                guard.data[inject] = row;
-                inject += increment;
+        new_table.columns = tables[0].columns.clone();
+        // looping through the tables to get each value from key 1..n
+        for table in tables {
+            for (key, value) in table.data {
+                new_table.data.insert(key, value);
             }
         }
-        let mut new_table = Arc::try_unwrap(new_table).unwrap_or(Mutex::new(Table::new())).into_inner();
-        new_table.columns = columns;
+        new_table.shard = None;
         Ok(new_table)
     }
 
-    pub fn get_data(&self) -> &Vec<Row> {
+    pub fn get_data(&self) -> &HashMap<usize, Row> {
         &self.data
     }
 
@@ -118,7 +145,7 @@ impl Table {
     pub fn add_column(&mut self, column_name: String) {
         let column_index = self.columns.len();
         self.columns.insert(column_index, column_name);
-        for row in &mut self.data {
+        for (_index,row) in &mut self.data {
             row.write().push(String::new());
         }
     }
@@ -128,7 +155,7 @@ impl Table {
         for column in &columns {
             sub_table.add_column(column.to_string());
         }
-        for row in &self.data {
+        for (_index,row) in &self.data {
             let new_row = Row::new(RwLock::new(Vec::new()));
             for column in &columns {
                 let column_index = self.field_to_index(column);
@@ -148,7 +175,7 @@ impl Table {
         for column in &columns {
             sub_table.add_column(column.to_string());
         }
-        for row in &self.data {
+        for (_index,row) in &self.data {
             let new_row = Row::new(RwLock::new(Vec::new()));
             for column in &columns {
                 let column_index = self.columns.iter().find_map(
@@ -193,8 +220,14 @@ impl Table {
                 self.columns.insert(index, String::new());
             }
         }
-        self.timestamps.push(Utc::now().timestamp());
-        self.data.push(row);
+        match &self.shard {
+            Some(shard) => self.latest_row += shard.shards,
+            None => {
+                self.latest_row += 1;
+            }
+        }
+        self.timestamps.insert(self.latest_row, Utc::now().timestamp_millis());
+        self.data.insert(self.latest_row, row);
     }
 
     // this is dumb and stupid
@@ -208,19 +241,19 @@ impl Table {
     }
 
     pub fn retain(&mut self, rows: Vec<Row>) {
-        let mut new_data = Vec::new();
+        let mut new_data = HashMap::new();
         let rows: Vec<Vec<String>> = rows.iter().map(|row| row.read().clone()).collect();
-        for row in &self.data {
+        for (index,row) in &self.data {
             let row = row.read().clone();
             if rows.contains(&row) {
-                new_data.push(Arc::new(RwLock::new(row)));
+                new_data.insert(*index,Arc::new(RwLock::new(row)));
             }
         }
         self.data = new_data;
     }
 
     pub fn get_row(&self, index: usize) -> Option<&Row> {
-        self.data.get(index)
+        self.data.get(&index)
     }
 
     /// Returns a value of a row at a given column field. Returns None if the field is not found,
@@ -260,15 +293,17 @@ impl Table {
         }
     }
 
-    pub fn get_all_rows(&self) -> Vec<&Row> {
-        self.data.iter().collect()
-    }
-    pub fn get_all_rows_as_index_map(&self) -> HashMap<usize, &Row> {
-        let mut map = HashMap::new();
-        for (index, row) in self.data.iter().enumerate() {
-            map.insert(index, row);
+    pub fn get_all_rows(&self) -> Vec<Row> {
+        let blank_row = Row::new(RwLock::new(Vec::new()));
+        let mut rows = vec![blank_row; self.data.len()];
+        for (index, row) in &self.data {
+            rows[*index-1] = row.clone();
         }
-        map
+        rows
+
+    }
+    pub fn get_all_rows_as_index_map(&self) -> HashMap<usize, Row> {
+        self.data.clone()
     }
 
     pub fn index_to_field(&self, index: usize) -> Option<&str> {
@@ -294,7 +329,7 @@ impl Table {
     ) -> Vec<Row> {
         let column_index = self.field_to_index(column_name);
         if let Some(column_index) = column_index {
-            self.data.contains(column_index, values)
+            self.get_all_rows().contains(column_index, values)
         } else {
             Vec::new()
         }
@@ -303,7 +338,7 @@ impl Table {
     pub fn search_eq(&self, column_name: &str, values: Vec<&str>) -> Vec<Row> {
         let column_index = self.field_to_index(column_name);
         if let Some(column_index) = column_index {
-            self.data.eq(column_index, values)
+            self.get_all_rows().eq(column_index, values)
         } else {
             Vec::new()
         }
@@ -312,7 +347,7 @@ impl Table {
     pub fn search_ne(&self, column_name: &str, values: Vec<&str>) -> Vec<Row> {
         let column_index = self.field_to_index(column_name);
         if let Some(column_index) = column_index {
-            self.data.ne(column_index, values)
+            self.get_all_rows().ne(column_index, values)
         } else {
             Vec::new()
         }
@@ -328,24 +363,24 @@ impl Table {
         row_map
     }
 
-    pub fn sort_by_column(&mut self, column_name: &str) {
-        if let Some(column_index) = self.columns.iter().find_map(|(index, name)| {
-            if name == column_name {
-                Some(*index)
-            } else {
-                None
-            }
-        }) {
-            self.data.sort_by(|row1, row2| {
-                let def = String::new();
-                let read_1 = row1.read();
-                let read_2 = row2.read();
-                let value1 = read_1.get(column_index).unwrap_or(&def);
-                let value2 = read_2.get(column_index).unwrap_or(&def);
-                value1.partial_cmp(value2).unwrap_or(Ordering::Equal)
-            });
-        }
-    }
+    // pub fn sort_by_column(&mut self, column_name: &str) {
+    //     if let Some(column_index) = self.columns.iter().find_map(|(index, name)| {
+    //         if name == column_name {
+    //             Some(*index)
+    //         } else {
+    //             None
+    //         }
+    //     }) {
+    //         self.data.sort_by(|row1, row2| {
+    //             let def = String::new();
+    //             let read_1 = row1.read();
+    //             let read_2 = row2.read();
+    //             let value1 = read_1.get(column_index).unwrap_or(&def);
+    //             let value2 = read_2.get(column_index).unwrap_or(&def);
+    //             value1.partial_cmp(value2).unwrap_or(Ordering::Equal)
+    //         });
+    //     }
+    // }
 
     pub fn sort_rows_by_column(&self, mut rows: Vec<Row>, column_name: &str) -> Vec<Row> {
         if let Some(column_index) = self.columns.iter().find_map(|(index, name)| {
@@ -379,7 +414,7 @@ pub fn write_table_to_xlsx(
         worksheet.write_string(row, *index as u16, name, None)?;
     }
     row += 1;
-    for row_data in table.data.iter() {
+    for (_,row_data) in table.data.iter() {
         let row_data = row_data.read();
         for (index, value) in row_data.iter().enumerate() {
             worksheet.write_string(row, index as u16, value, None)?;
@@ -407,6 +442,7 @@ pub fn read_csv_to_table(file_path: &str, skip: Option<usize>) -> Result<Table, 
     for (i, field) in column_record.iter() {
         table.columns.insert(*i, field.to_owned());
     }
+    let mut row_index = 1;
     for result in rdr.records() {
         let record = result?;
         let mut row = Vec::new();
@@ -414,7 +450,10 @@ pub fn read_csv_to_table(file_path: &str, skip: Option<usize>) -> Result<Table, 
             row.push(field.to_owned());
         }
         let row = Arc::new(RwLock::new(row));
-        table.data.push(row);
+        table.data.insert(row_index, row);
+        table.timestamps.insert(row_index, Utc::now().timestamp_millis());
+        table.latest_row = row_index;
+        row_index += 1;
     }
     Ok(table)
 }
@@ -441,6 +480,7 @@ pub fn read_csv(file_path: &str, skip: Option<usize>) -> Result<Table, Box<dyn E
             .collect();
         let row = Arc::new(RwLock::new(row));
         table.add_row(row);
+        table.latest_row += 1;
     }
     Ok(table)
 }
